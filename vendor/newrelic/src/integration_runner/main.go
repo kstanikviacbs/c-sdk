@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package main
 
 import (
@@ -26,19 +31,25 @@ import (
 )
 
 var (
-	flagAgent     = flag.String("agent", "", "")
-	flagCGI       = flag.String("cgi", "", "")
-	flagCollector = flag.String("collector", "", "the collector host")
-	flagLoglevel  = flag.String("loglevel", "", "agent log level")
-	flagOutputDir = flag.String("output-dir", ".", "")
-	flagPattern   = flag.String("pattern", "test_*", "shell pattern describing tests to run")
-	flagPHP       = flag.String("php", "", "")
-	flagPort      = flag.String("port", defaultPort(), "")
-	flagRetry     = flag.Int("retry", 0, "maximum retry attempts")
-	flagTimeout   = flag.Duration("timeout", 10*time.Second, "")
-	flagValgrind  = flag.String("valgrind", "", "if given, this is the path to valgrind")
-	flagWorkers   = flag.Int("threads", 1, "")
-	flagTime      = flag.Bool("time", false, "time each test")
+	DefaultMaxCustomEvents = 30000
+)
+
+var (
+	flagAgent           = flag.String("agent", "", "")
+	flagCGI             = flag.String("cgi", "", "")
+	flagCollector       = flag.String("collector", "", "the collector host")
+	flagLoglevel        = flag.String("loglevel", "", "agent log level")
+	flagOutputDir       = flag.String("output-dir", ".", "")
+	flagPattern         = flag.String("pattern", "test_*", "shell pattern describing tests to run")
+	flagPHP             = flag.String("php", "", "")
+	flagPort            = flag.String("port", defaultPort(), "")
+	flagRetry           = flag.Int("retry", 0, "maximum retry attempts")
+	flagTimeout         = flag.Duration("timeout", 10*time.Second, "")
+	flagValgrind        = flag.String("valgrind", "", "if given, this is the path to valgrind")
+	flagWorkers         = flag.Int("threads", 1, "")
+	flagTime            = flag.Bool("time", false, "time each test")
+	flagMaxCustomEvents = flag.Int("max_custom_events", 30000, "value for newrelic.custom_events.max_samples_stored")
+	flagWarnIsFail      = flag.Bool("warnisfail", false, "warn result is treated as a fail")
 
 	// externalPort is the port on which we start a server to handle
 	// external calls.
@@ -108,6 +119,8 @@ var (
 	// Global storage for response headers that are sent by the CAT
 	// endpoint during a test run.
 	responseHeaders http.Header
+	// Lock for protecting against concurrent writes of response headers
+	responseHeadersLock sync.Mutex
 )
 
 // Default directories to search for tests.
@@ -127,15 +140,27 @@ var (
 		HighSecurity:      false,
 		Environment:       nil,
 		Labels:            nil,
+		Metadata:          nil,
 		Settings:
 		// Ensure that we get Javascript agent code in the reply
 		map[string]interface{}{"newrelic.browser_monitoring.debug": false, "newrelic.browser_monitoring.loader": "rum"},
 		SecurityPolicyToken: "",
+		// Set log and customer event limits to non-zero values or else collector will return 0.
+		// Use default value for logging.
+		// Use max value for custom event so integration tests can exercise full range of values for max to record.
+		AgentEventLimits: collector.EventConfigs{
+			LogEventConfig: collector.Event{
+				Limit: 10000,
+			},
+			CustomEventConfig: collector.Event{
+				Limit: DefaultMaxCustomEvents,
+			},
+		},
 	}
 
 	// Integration tests have this mock cross process id hard coded into
 	// metric assertions
-	MockCrossProcessId = "432507#4741547"
+	MockCrossProcessId = fmt.Sprintf("%s#%s", secrets.NewrelicAccountId, secrets.NewrelicAppId)
 )
 
 var ctx *integration.Context
@@ -163,6 +188,8 @@ func merge(a, b map[string]string) map[string]string {
 
 func catRequest(w http.ResponseWriter, r *http.Request) {
 	catFile := r.URL.Query().Get("file")
+	dtEnabled := r.URL.Query().Get("dt_enabled")
+	catEnabled := r.URL.Query().Get("cat_enabled")
 	if "" == catFile {
 		http.Error(w, "cat failure: no file provided", http.StatusBadRequest)
 		return
@@ -171,6 +198,23 @@ func catRequest(w http.ResponseWriter, r *http.Request) {
 	env := merge(ctx.Env, nil)
 	settings := merge(ctx.Settings, nil)
 	settings["newrelic.appname"] = "ignore"
+	if "false" == dtEnabled {
+		settings["newrelic.distributed_tracing_enabled"] = "false"
+	} else if "true" == dtEnabled {
+		settings["newrelic.distributed_tracing_enabled"] = "true"
+	} else {
+		http.Error(w, "cat request: invalid value of dt_enabled - expected 'true' or 'false', got '"+dtEnabled+"'.", http.StatusBadRequest)
+		return
+	}
+
+	if "false" == catEnabled {
+		settings["newrelic.cross_application_tracer.enabled"] = "false"
+	} else if "true" == catEnabled {
+		settings["newrelic.cross_application_tracer.enabled"] = "true"
+	} else {
+		http.Error(w, "cat request: invalid value of cat_enabled - expected 'true' or 'false', got '"+catEnabled+"'.", http.StatusBadRequest)
+		return
+	}
 
 	tx, err := integration.CgiTx(integration.ScriptFile(catFile), env, settings, r.Header, ctx)
 	if nil != err {
@@ -190,7 +234,9 @@ func catRequest(w http.ResponseWriter, r *http.Request) {
 		for _, val := range vals {
 			h.Add(key, val)
 			if true != ignoreResponseHeaders[key] && responseHeaders != nil {
+				responseHeadersLock.Lock()
 				responseHeaders.Add(key, val)
+				responseHeadersLock.Unlock()
 			}
 		}
 	}
@@ -219,6 +265,9 @@ func main() {
 		TestApp.RedirectCollector = "collector.newrelic.com"
 	}
 	TestApp.License = collector.LicenseKey(secrets.NewrelicLicenseKey)
+
+	// Set value that will be sent to collector for the max custom event samples
+	TestApp.AgentEventLimits.CustomEventConfig.Limit = *flagMaxCustomEvents
 
 	// Set the redirect collector from the flag, if given.
 	if *flagCollector != "" {
@@ -336,7 +385,7 @@ func main() {
 
 		handler.Lock()
 		for _, tc := range tests {
-			if !tc.Failed && !tc.Skipped {
+			if !tc.Failed && !tc.Skipped && !tc.Warned {
 				if handler.harvests[tc.Name] == nil {
 					testsToRetry <- tc
 				}
@@ -355,15 +404,19 @@ func main() {
 	deleteSockfile("unix", *flagPort)
 
 	var numFailed int
+	var numWarned int
 
 	// Compare the output
 	handler.Lock()
 	for _, tc := range tests {
-		if !tc.Failed && !tc.Skipped {
+		if !tc.Failed && !tc.Skipped && !tc.Warned {
 			tc.Compare(handler.harvests[tc.Name])
 		}
 		if tc.Failed && tc.Xfail == "" {
 			numFailed++
+		}
+		if tc.Warned {
+			numWarned++
 		}
 	}
 
@@ -372,11 +425,15 @@ func main() {
 	if numFailed > 0 {
 		os.Exit(1)
 	}
+	if *flagWarnIsFail && numWarned > 0 {
+		os.Exit(2)
+	}
 }
 
 var (
 	skipRE  = regexp.MustCompile(`^(?i)\s*skip`)
 	xfailRE = regexp.MustCompile(`^(?i)\s*xfail`)
+	warnRE  = regexp.MustCompile(`^warn:\s+`)
 )
 
 func runTests(testsToRun chan *integration.Test, numWorkers int) {
@@ -500,6 +557,12 @@ func runTest(t *integration.Test) {
 		return
 	}
 
+	if warnRE.Match(body) {
+		reason := string(bytes.TrimSpace(head(body)))
+		t.Warn(reason)
+		return
+	}
+
 	if xfailRE.Match(body) {
 		// Strip xfail message from body so it does not affect expectations.
 		tmp := bytes.SplitN(body, []byte("\n"), 2)
@@ -547,10 +610,10 @@ func discoverTests(pattern string, searchPaths []string) []string {
 	return testFiles
 }
 
-func injectIntoConnectReply(reply []byte, newRunID, crossProcessId string) []byte {
+func injectIntoConnectReply(reply collector.RPMResponse, newRunID, crossProcessId string) []byte {
 	var x map[string]interface{}
 
-	json.Unmarshal(reply, &x)
+	json.Unmarshal(reply.Body, &x)
 
 	x["agent_run_id"] = newRunID
 	x["cross_process_id"] = crossProcessId
@@ -562,7 +625,7 @@ func injectIntoConnectReply(reply []byte, newRunID, crossProcessId string) []byt
 type IntegrationDataHandler struct {
 	sync.Mutex                                       // Protects harvests
 	harvests            map[string]*newrelic.Harvest // Keyed by tc.Name (which is used as AgentRunID)
-	reply               []byte                       // Constant after creation
+	reply               collector.RPMResponse        // Constant after creation
 	rawSecurityPolicies []byte                       // policies from connection attempt, needed for AppInfo reply
 }
 
@@ -572,7 +635,7 @@ func (h *IntegrationDataHandler) IncomingTxnData(id newrelic.AgentRunID, sample 
 
 	harvest := h.harvests[string(id)]
 	if nil == harvest {
-		harvest = newrelic.NewHarvest(time.Now(), collector.NewHarvestLimits())
+		harvest = newrelic.NewHarvest(time.Now(), collector.NewHarvestLimits(nil))
 		// Save a little memory by reducing the event pools.
 		harvest.TxnEvents = newrelic.NewTxnEvents(50)
 		harvest.CustomEvents = newrelic.NewCustomEvents(50)
@@ -581,6 +644,8 @@ func (h *IntegrationDataHandler) IncomingTxnData(id newrelic.AgentRunID, sample 
 
 	sample.AggregateInto(harvest)
 }
+
+func (h *IntegrationDataHandler) IncomingSpanBatch(batch newrelic.SpanBatch) {}
 
 func (h *IntegrationDataHandler) IncomingAppInfo(id *newrelic.AgentRunID, info *newrelic.AppInfo) newrelic.AppInfoReply {
 	return newrelic.AppInfoReply{
@@ -600,8 +665,8 @@ func deleteSockfile(network, address string) {
 	if network == "unix" && !(address[0] == '@') {
 		err := os.Remove(address)
 		if err != nil && !os.IsNotExist(err) {
-			fmt.Fprintln(os.Stderr, "unable to remove stale sock file: %v"+
-				" - another daemon may already be running?", err)
+			fmt.Fprintf(os.Stderr, "unable to remove stale sock file: %v"+
+				" - another daemon may already be running?\n", err)
 		}
 	}
 }
@@ -621,11 +686,12 @@ func startDaemon(network, address string, securityToken string, securityPolicies
 	client, _ := newrelic.NewClient(&newrelic.ClientConfig{})
 	connectPayload := TestApp.ConnectPayload(utilization.Gather(
 		utilization.Config{
-			DetectAWS:    true,
-			DetectAzure:  true,
-			DetectGCP:    true,
-			DetectPCF:    true,
-			DetectDocker: true,
+			DetectAWS:        true,
+			DetectAzure:      true,
+			DetectGCP:        true,
+			DetectPCF:        true,
+			DetectDocker:     true,
+			DetectKubernetes: true,
 		}))
 
 	policies := newrelic.AgentPolicies{}

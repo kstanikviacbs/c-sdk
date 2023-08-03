@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 // Package signal provides helpers to allow worker processes to signal to their
 // progenitors that they are ready to receive connections.
 package signal

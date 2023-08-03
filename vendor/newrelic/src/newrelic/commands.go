@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package newrelic
 
 import (
@@ -6,7 +11,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/google/flatbuffers/go"
+	flatbuffers "github.com/google/flatbuffers/go"
 
 	"newrelic/collector"
 	"newrelic/limits"
@@ -36,13 +41,13 @@ func aggregateMetrics(txn protocol.Transaction, h *Harvest, txnName string) {
 		d[5] = data.SumSquares()
 
 		forced := Unforced
-		if data.Forced() != 0 {
+		if data.Forced() != false {
 			forced = Forced
 		}
 
 		metricName := m.Name()
 		h.Metrics.AddRaw(metricName, "", "", d, forced)
-		if data.Scoped() != 0 {
+		if data.Scoped() != false {
 			h.Metrics.AddRaw(metricName, "", txnName, d, forced)
 		}
 	}
@@ -152,6 +157,16 @@ func (t FlatTxn) AggregateInto(h *Harvest) {
 		}
 	}
 
+	if n := txn.LogEventsLength(); n > 0 {
+		var e protocol.Event
+
+		for i := 0; i < n; i++ {
+			txn.LogEvents(&e, i)
+			data := copySlice(e.Data())
+			h.LogEvents.AddEventFromData(data, samplingPriority)
+		}
+	}
+
 	if trace := txn.Trace(nil); trace != nil {
 		data := trace.Data()
 		tt := &TxnTrace{
@@ -159,7 +174,7 @@ func (t FlatTxn) AggregateInto(h *Harvest) {
 			DurationMillis:       trace.Duration(),
 			GUID:                 string(trace.Guid()),
 			SyntheticsResourceID: syntheticsResourceID,
-			ForcePersist:         trace.ForcePersist() != 0,
+			ForcePersist:         trace.ForcePersist() != false,
 			MetricName:           txnName,
 			RequestURI:           requestURI,
 		}
@@ -251,17 +266,25 @@ func UnmarshalAppInfo(tbl flatbuffers.Table) *AppInfo {
 		RedirectCollector:         string(app.RedirectCollector()),
 		Environment:               JSONString(copySlice(app.Environment())),
 		Labels:                    JSONString(copySlice(app.Labels())),
+		Metadata:                  JSONString(copySlice(app.Metadata())),
 		Hostname:                  string(app.Host()),
 		HostDisplayName:           string(app.DisplayHost()),
 		SecurityPolicyToken:       string(app.SecurityPolicyToken()),
 		SupportedSecurityPolicies: policies,
+		TraceObserverHost:         string(app.TraceObserverHost()),
+		TraceObserverPort:         app.TraceObserverPort(),
+		SpanQueueSize:             app.SpanQueueSize(),
+		HighSecurity:              app.HighSecurity(),
 	}
 
 	info.initSettings(app.Settings())
 
-	if app.HighSecurity() != 0 {
-		info.HighSecurity = true
-	}
+	// Of the four Event Limits (span, custom, analytic and error),
+	// only span, log, and custom events are configurable from the agent.
+	// If this changes in the future, the other values can be added here.
+	info.AgentEventLimits.SpanEventConfig.Limit = int(app.SpanEventsMaxSamplesStored())
+	info.AgentEventLimits.LogEventConfig.Limit = int(app.LogEventsMaxSamplesStored())
+	info.AgentEventLimits.CustomEventConfig.Limit = int(app.CustomEventsMaxSamplesStored())
 
 	return info
 }
@@ -317,6 +340,27 @@ func processBinary(data []byte, handler AgentDataHandler) ([]byte, error) {
 		reply := handler.IncomingAppInfo(runID, info)
 
 		return MarshalAppInfoReply(reply), nil
+
+	case protocol.MessageBodySpanBatch:
+		var tbl flatbuffers.Table
+
+		if !msg.Data(&tbl) {
+			return nil, errors.New("span batch missing message body")
+		}
+
+		var batch protocol.SpanBatch
+		batch.Init(tbl.Bytes, tbl.Pos)
+
+		id := msg.AgentRunId()
+		if len(id) == 0 {
+			return nil, errors.New("missing agent run id for span batch command")
+		}
+
+		spanBatch := SpanBatch{id: AgentRunID(id), count: batch.Count(), batch: batch.EncodedBytes()}
+
+		handler.IncomingSpanBatch(spanBatch)
+
+		return nil, nil
 
 	case protocol.MessageBodyNONE:
 		log.Debugf("ignoring None message")

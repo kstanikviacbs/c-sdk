@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package newrelic
 
 import (
@@ -6,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,11 +27,6 @@ import (
 //   * Parsing the preamble and envelope from inbound messages
 //   * Dispatching the command to the AgentDataHandler
 //   * Writing any reply created by the AgentDataHandler
-//
-// DefaultListenSocket is the default location for the agent daemon
-// communication socket.  Note that this constant should match the agent's
-// NR_PHP_INI_DEFAULT_PORT value.
-const DefaultListenSocket = "/tmp/.newrelic.sock"
 
 const (
 	maxMessageSize = 2 << 20 /* 2 MB */
@@ -42,6 +43,20 @@ const (
 )
 
 var byteOrder = binary.LittleEndian
+
+// DefaultListenSocket is the default location for the agent daemon
+// communication socket. Note that this should match the agent's
+// NR_PHP_INI_DEFAULT_PORT value.
+//
+// Linux systems use the abstract socket "@newrelic" by default, MacOS and
+// FreeBSD use the socket file "/tmp/.newrelic.sock".
+func DefaultListenSocket() string {
+	if runtime.GOOS == "linux" {
+		return "@newrelic"
+	} else {
+		return "/tmp/.newrelic.sock"
+	}
+}
 
 type Listener struct {
 	listener net.Listener
@@ -296,7 +311,7 @@ func (mw *MessageWriter) writeHeader(length uint32) (n int, err error) {
 // single message. It returns the number of bytes written and any error
 // encountered that caused the write to stop early. When write fails to
 // write the complete message, the underlying data stream should be
-// assummed to be out of sync.
+// assumed to be out of sync.
 func (mw *MessageWriter) Write(p []byte) (n int, err error) {
 	nw, err := mw.writeHeader(uint32(len(p)))
 	if nw > 0 {

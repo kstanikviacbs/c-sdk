@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package newrelic
 
 import (
@@ -5,8 +10,24 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io"
+	"runtime"
 	"testing"
 )
+
+func TestDefaultListenSocket(t *testing.T) {
+	want := "@newrelic"
+
+	if runtime.GOOS != "linux" {
+		want = "/tmp/.newrelic.sock"
+	}
+
+	actual := DefaultListenSocket()
+
+	if want != actual {
+		t.Errorf("invalid default socket, want = %v got = %v", want, actual)
+	}
+
+}
 
 func TestWriteHeader(t *testing.T) {
 	buf := bytes.Buffer{}

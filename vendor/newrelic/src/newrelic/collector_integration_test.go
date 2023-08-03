@@ -1,3 +1,9 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+//go:build integration
 // +build integration
 
 package newrelic
@@ -27,11 +33,12 @@ func sampleConnectPayload(lic collector.LicenseKey) *RawConnectPayload {
 	}
 
 	return info.ConnectPayload(utilization.Gather(utilization.Config{
-		DetectAWS:    false,
-		DetectAzure:  false,
-		DetectGCP:    false,
-		DetectPCF:    false,
-		DetectDocker: false,
+		DetectAWS:        false,
+		DetectAzure:      false,
+		DetectGCP:        false,
+		DetectPCF:        false,
+		DetectDocker:     false,
+		DetectKubernetes: false,
 	}))
 }
 

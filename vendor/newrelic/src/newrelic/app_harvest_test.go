@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package newrelic
 
 import (
@@ -19,7 +24,7 @@ type MockedAppHarvest struct {
 }
 
 func (m *MockedAppHarvest) NewMockedAppHarvest() {
-	harvest := NewHarvest(time.Now(), collector.NewHarvestLimits())
+	harvest := NewHarvest(time.Now(), collector.NewHarvestLimits(nil))
 
 	m.App.HarvestTrigger = triggerBuilder(HarvestAll, time.Duration(m.cycleDuration))
 
@@ -28,7 +33,9 @@ func (m *MockedAppHarvest) NewMockedAppHarvest() {
 
 func TestAppHarvestMessageTransformation(t *testing.T) {
 	m := &MockedAppHarvest{
-		App:                  &App{},
+		App: &App{
+			info: &AppInfo{},
+		},
 		processorHarvestChan: make(chan ProcessorHarvest),
 		cycleDuration:        1 * time.Minute,
 	}
@@ -52,7 +59,9 @@ func TestAppHarvestMessageTransformation(t *testing.T) {
 
 func TestAppHarvestTrigger(t *testing.T) {
 	m := &MockedAppHarvest{
-		App:                  &App{},
+		App: &App{
+			info: &AppInfo{},
+		},
 		processorHarvestChan: make(chan ProcessorHarvest),
 		cycleDuration:        2 * time.Millisecond,
 	}
@@ -70,7 +79,9 @@ func TestAppHarvestTrigger(t *testing.T) {
 
 func TestAppHarvestClose(t *testing.T) {
 	m := &MockedAppHarvest{
-		App:                  &App{},
+		App: &App{
+			info: &AppInfo{},
+		},
 		processorHarvestChan: make(chan ProcessorHarvest),
 		cycleDuration:        1 * time.Minute,
 	}

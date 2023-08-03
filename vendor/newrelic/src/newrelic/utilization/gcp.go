@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package utilization
 
 import (
@@ -78,7 +83,17 @@ func newGCP() *gcp {
 	}
 }
 
-func (g *gcp) Gather() error {
+func (g *gcp) Gather() (ret error) {
+	// In some cases, 3rd party providers might block requests to metadata
+	// endpoints in such a way that causes a panic in the underlying
+	// net/http library's (*Transport).getConn() function. To mitigate that
+	// possibility, we preemptively setup a recovery deferral.
+	defer func() {
+		if r := recover(); r != nil {
+			ret = fmt.Errorf("GCP utilization check error: %v", r)
+		}
+	}()
+
 	// GCP's metadata service requires a Metadata-Flavor header.
 	req, err := http.NewRequest("GET", gcpEndpoint, nil)
 	if err != nil {

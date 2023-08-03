@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package newrelic
 
 import (
@@ -102,6 +107,14 @@ func (data *metricData) aggregate(src *metricData) {
 	}
 
 	data.sumSquares += src.sumSquares
+}
+
+// NumAttempts returns the total number of attempts sent to this endpoint.
+// The value is the number of times the agent attempted to call the given endpoint before it was successful.
+// This metric MUST NOT be generated if only one attempt was made.
+// Does not include the successful attempt.
+func (mt *MetricTable) NumFailedAttempts() float64 {
+	return float64(mt.failedHarvests)
 }
 
 func (mt *MetricTable) mergeMetric(nameSlice []byte, nameString, scope string,

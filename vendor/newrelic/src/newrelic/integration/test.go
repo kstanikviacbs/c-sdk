@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package integration
 
 import (
@@ -8,6 +13,7 @@ import (
 	"net/http"
 	"newrelic/log"
 	"newrelic/sysinfo"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -27,6 +33,7 @@ type Test struct {
 	customEvents   []byte
 	errorEvents    []byte
 	spanEvents     []byte
+	logEvents      []byte
 	metrics        []byte
 	slowSQLs       []byte
 	tracedErrors   []byte
@@ -56,6 +63,7 @@ type Test struct {
 
 	// Remaining fields are populated after the test is run.
 	Skipped bool
+	Warned  bool
 
 	// If the test was skipped or the test could not be run due to an
 	// error, describes the reason.
@@ -130,6 +138,19 @@ func (t *Test) Skipf(format string, args ...interface{}) {
 	t.Err = fmt.Errorf(format, args...)
 }
 
+// Warn marks the test as unable to be run and records the given reason.
+func (t *Test) Warn(reason string) {
+	t.Warned = true
+	t.Err = errors.New(reason)
+}
+
+// Warnf marks the test as unable to be run  and formats its arguments
+// according to the format, and records the text as the reason.
+func (t *Test) Warnf(format string, args ...interface{}) {
+	t.Warned = true
+	t.Err = fmt.Errorf(format, args...)
+}
+
 // Fail records an unsatisified expectation for the test and marks
 // the test as failed.
 func (t *Test) Fail(err error) {
@@ -165,11 +186,19 @@ func (t *Test) MakeRun(ctx *Context) (Tx, error) {
 	settings := merge(ctx.Settings, t.Settings)
 	settings["newrelic.appname"] = t.Name
 
+	headers := make(http.Header)
+	for key, vals := range t.headers {
+		for _, v := range vals {
+			expanded := SubEnvVars([]byte(v))
+			headers.Set(key, string(expanded))
+		}
+	}
+
 	if t.IsC() {
-		return CTx(ScriptFile(t.Path), env, settings, t.headers, ctx)
+		return CTx(ScriptFile(t.Path), env, settings, headers, ctx)
 	}
 	if t.IsWeb() {
-		return CgiTx(ScriptFile(t.Path), env, settings, t.headers, ctx)
+		return CgiTx(ScriptFile(t.Path), env, settings, headers, ctx)
 	}
 	return PhpTx(ScriptFile(t.Path), env, settings, ctx)
 }
@@ -234,6 +263,13 @@ func ScrubHost(in []byte) []byte {
 
 	re := regexp.MustCompile("\\b" + regexp.QuoteMeta(host) + "\\b")
 	return re.ReplaceAll(in, []byte("__HOST__"))
+}
+
+func SubEnvVars(in []byte) []byte {
+	re := regexp.MustCompile("ENV\\[.*?\\]")
+	return re.ReplaceAllFunc(in, func(match []byte) []byte {
+		return []byte(os.Getenv(string(match[4 : len(match)-1])))
+	})
 }
 
 // Response headers have to be compared in this verbose way to support the "??"
@@ -325,6 +361,8 @@ func (t *Test) comparePayload(expected json.RawMessage, pc newrelic.PayloadCreat
 		}
 	}
 
+	expected = SubEnvVars(expected)
+
 	err = IsFuzzyMatch(expected, actual)
 	if nil != err {
 		actualPretty := bytes.Buffer{}
@@ -344,7 +382,7 @@ var (
 		regexp.MustCompile(`CPU/User/Utilization`),
 		regexp.MustCompile(`Memory/Physical`),
 		regexp.MustCompile(`Supportability/execute/user/call_count`),
-		regexp.MustCompile(`Supportability/execute/user/custom_segment_count`),
+		regexp.MustCompile(`Supportability/execute/allocated_segment_count`),
 		regexp.MustCompile(`Memory/RSS`),
 		regexp.MustCompile(`^Supportability\/Locale`),
 		regexp.MustCompile(`^Supportability\/InstrumentedFunction`),
@@ -417,6 +455,7 @@ func (t *Test) Compare(harvest *newrelic.Harvest) {
 	t.comparePayload(t.customEvents, harvest.CustomEvents, false)
 	t.comparePayload(t.errorEvents, harvest.ErrorEvents, false)
 	t.comparePayload(t.spanEvents, harvest.SpanEvents, false)
+	t.comparePayload(t.logEvents, harvest.LogEvents, false)
 	t.comparePayload(expectedMetrics, harvest.Metrics, true)
 	t.comparePayload(t.slowSQLs, harvest.SlowSQLs, false)
 	t.comparePayload(t.tracedErrors, harvest.Errors, false)
@@ -435,6 +474,7 @@ func (t *Test) Compare(harvest *newrelic.Harvest) {
 func (t *Test) Reset() {
 	t.Xfail = ""
 	t.Skipped = false
+	t.Warned = false
 	t.Err = nil
 	t.Output = nil
 	t.Failed = false

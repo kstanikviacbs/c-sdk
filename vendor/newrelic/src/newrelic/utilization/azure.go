@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package utilization
 
 import (
@@ -39,7 +44,17 @@ func newAzure() *azure {
 	}
 }
 
-func (az *azure) Gather() error {
+func (az *azure) Gather() (ret error) {
+	// In some cases, 3rd party providers might block requests to metadata
+	// endpoints in such a way that causes a panic in the underlying
+	// net/http library's (*Transport).getConn() function. To mitigate that
+	// possibility, we preemptively setup a recovery deferral.
+	defer func() {
+		if r := recover(); r != nil {
+			ret = fmt.Errorf("Azure utilization check error: %v", r)
+		}
+	}()
+
 	// Azure's metadata service requires a Metadata header to avoid accidental
 	// redirects.
 	req, err := http.NewRequest("GET", azureEndpoint, nil)

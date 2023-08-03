@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package log
 
 import "testing"
@@ -15,6 +20,7 @@ func TestParseLevel(t *testing.T) {
 		{LogDebug, "debug"},
 		{LogDebug, "verbose"},
 		{LogDebug, "verbosedebug"},
+		{LogHealthCheck, "healthcheck"},
 	}
 
 	for i := range tests {

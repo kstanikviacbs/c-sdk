@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package main
 
 import (
@@ -119,7 +124,7 @@ func (df *DaemonFlagSet) Parse(args []string) error {
 
 	if addrFlag.String() == "" && portFlag.String() == "" {
 		// Both flags are empty. Use the default.
-		addrFlag.Set(newrelic.DefaultListenSocket)
+		addrFlag.Set(newrelic.DefaultListenSocket())
 	} else if addrFlag.String() != "" && portFlag.String() != "" {
 		// Both flags are set. Use --address and write a warning.
 		err = &daemonFlagWarning{
@@ -234,6 +239,7 @@ type Config struct {
 	DetectGCP          bool           `config:"utilization.detect_gcp"`         // Whether to detect if this is running on GCP in utilization
 	DetectPCF          bool           `config:"utilization.detect_pcf"`         // Whether to detect if this is running on PCF in utilization
 	DetectDocker       bool           `config:"utilization.detect_docker"`      // Whether to detect if this is in a Docker container in utilization
+	DetectKubernetes   bool           `config:"utilization.detect_kubernetes"`  // Whether to detect if this is in a Kubernetes cluster
 	LogicalProcessors  int            `config:"utilization.logical_processors"` // Customer provided number of logical processors for pricing control.
 	TotalRamMIB        int            `config:"utilization.total_ram_mib"`      // Customer provided total RAM in mebibytes for pricing control.
 	BillingHostname    string         `config:"utilization.billing_hostname"`   // Customer provided hostname for pricing control.
@@ -254,6 +260,7 @@ func (cfg *Config) MakeUtilConfig() utilization.Config {
 		DetectGCP:         cfg.DetectGCP,
 		DetectPCF:         cfg.DetectPCF,
 		DetectDocker:      cfg.DetectDocker,
+		DetectKubernetes:  cfg.DetectKubernetes,
 		LogicalProcessors: cfg.LogicalProcessors,
 		TotalRamMIB:       cfg.TotalRamMIB,
 		BillingHostname:   cfg.BillingHostname,
@@ -333,11 +340,12 @@ func main() {
 
 	if cfg.Utilization {
 		util := utilization.Gather(utilization.Config{
-			DetectAWS:    true,
-			DetectAzure:  true,
-			DetectGCP:    true,
-			DetectPCF:    true,
-			DetectDocker: true,
+			DetectAWS:        true,
+			DetectAzure:      true,
+			DetectGCP:        true,
+			DetectPCF:        true,
+			DetectDocker:     true,
+			DetectKubernetes: true,
 		})
 		str, err := json.MarshalIndent(util, "", "\t")
 		if err != nil {

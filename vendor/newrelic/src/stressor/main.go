@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package main
 
 import (
@@ -27,6 +32,7 @@ import (
 	"flatbuffersdata"
 	"newrelic"
 	"newrelic/collector"
+	"newrelic/infinite_tracing/proto_testdata"
 	"newrelic/protocol"
 	"newrelic/ratelimit"
 	"newrelic/sysinfo"
@@ -41,6 +47,8 @@ OPTIONS
   --lifespan=DURATION    Test duration [default: 200s]
   --rpm=N                Target transactions per minute [default: 6000]
   --concurrency=N        Maximum concurrent transactions [default: auto]
+  --spans-per-txn=N      Spans sent with each transaction [default: 0]
+  --spans-batch-size=N   Number of spans in one batch [default: 0]
   --logfile=FILE         Log file location [default: stdout]
   --datadir=DIR          Transaction data sample directory
                          [default: src/newrelic/sample_data]
@@ -50,6 +58,8 @@ OPTIONS
                          pprof profiling interface. [default: no]
   --agent-hostname       Set the name to be used as the hostname of the
 			 reporting agent. [default: local hostname]
+  --trace-observer-host  Trace observer endpoint
+  --trace-observer-port  Trace observer port
 
 DESCRIPTION
   The stressor is used to test the daemon in isolation (i.e. without
@@ -83,16 +93,20 @@ const (
 )
 
 var (
-	flagPort        = flag.String("port", newrelic.DefaultListenSocket, "")
-	flagApps        = flag.Int("applications", DefaultApps, "")
-	flagLifespan    = flag.Duration("lifespan", DefaultLifespan, "")
-	flagRPM         = flag.Int("rpm", DefaultRPM, "")
-	flagConcurrency = flag.Int("concurrency", 0, "")
-	flagDataDir     = flag.String("datadir", "src/newrelic/sample_data", "")
-	flagLogFile     = flag.String("logfile", "stdout", "")
-	flagCPUProfile  = flag.String("cpuprofile", "", "")
-	flagDaemonPprof = flag.Int("daemon-pprof", 0, "")
-	flagHostname    = flag.String("agent-hostname", "", "")
+	flagPort              = flag.String("port", newrelic.DefaultListenSocket(), "")
+	flagApps              = flag.Int("applications", DefaultApps, "")
+	flagLifespan          = flag.Duration("lifespan", DefaultLifespan, "")
+	flagRPM               = flag.Int("rpm", DefaultRPM, "")
+	flagConcurrency       = flag.Int("concurrency", 0, "")
+	flagSpans             = flag.Int("spans-per-txn", 0, "")
+	flagSpansBatch        = flag.Int("spans-batch-size", 0, "")
+	flagDataDir           = flag.String("datadir", "src/newrelic/sample_data", "")
+	flagLogFile           = flag.String("logfile", "stdout", "")
+	flagCPUProfile        = flag.String("cpuprofile", "", "")
+	flagDaemonPprof       = flag.Int("daemon-pprof", 0, "")
+	flagHostname          = flag.String("agent-hostname", "", "")
+	flagTraceObserverHost = flag.String("trace-observer-host", "", "")
+	flagTraceObserverPort = flag.Int("trace-observer-port", 0, "")
 )
 
 // EstimatedRTT is an estimate of the typical roundtrip time to
@@ -138,6 +152,11 @@ func (app *StressorApp) Populate(index int) error {
 	}
 	if userCollector := os.Getenv("NEW_RELIC_HOST"); userCollector != "" {
 		info.RedirectCollector = userCollector
+	}
+
+	if *flagTraceObserverHost != "" && *flagTraceObserverPort > 0 {
+		info.TraceObserverHost = *flagTraceObserverHost
+		info.TraceObserverPort = uint16(*flagTraceObserverPort)
 	}
 
 	qry, err := flatbuffersdata.MarshalAppInfo(&info)
@@ -255,6 +274,7 @@ type Stats struct {
 	NumTxn int
 
 	NumMsg   int // Number of messages sent to the daemon.
+	NumSpans int // Number of spans sent to the daemon.
 	Errors   int // Total errors
 	Timeouts int // Total timeout errors
 }
@@ -262,6 +282,7 @@ type Stats struct {
 func (s *Stats) Aggregate(t *Stats) {
 	s.NumTxn += t.NumTxn
 	s.NumMsg += t.NumMsg
+	s.NumSpans += t.NumSpans
 	s.Errors += t.Errors
 	s.Timeouts += t.Timeouts
 }
@@ -325,6 +346,35 @@ func hammer(bucket *ratelimit.Bucket, stopChan <-chan struct{}, txn flatbuffersd
 			_, err := mw.Write(txnMsg)
 			if err != nil {
 				return stats, err
+			}
+
+			// Send spans in batches
+			for numSpans := *flagSpans; numSpans > 0; numSpans -= *flagSpansBatch {
+				batchSize := *flagSpansBatch
+
+				if batchSize > numSpans {
+					batchSize = numSpans
+				}
+
+				// Protobuf encoded span batch
+				protoSpanBatch, err := proto_testdata.MarshalSpanBatch(uint(batchSize))
+				if err != nil {
+					return stats, err
+				}
+
+				// flatbuffer encoded span batch
+				spanMsg, err := txn.MarshalSpanBatchBinary(batchSize, protoSpanBatch)
+				if err != nil {
+					return stats, err
+				} else {
+					_, err := mw.Write(spanMsg)
+					if err != nil {
+						return stats, err
+					} else {
+						stats.NumSpans += batchSize
+						stats.NumMsg += 1
+					}
+				}
 			}
 		}
 	}
@@ -525,7 +575,7 @@ func reportDaemonStats(stats *MemStats, numMsg uint64, lifespan time.Duration) {
 }
 
 func main() {
-	flag.Usage = func() { fmt.Fprintln(os.Stderr, helpMessage) }
+	flag.Usage = func() { fmt.Fprint(os.Stderr, helpMessage, '\n') }
 	flag.Parse()
 
 	if *flagCPUProfile != "" {
@@ -625,6 +675,8 @@ func main() {
 		60*float64(stats.NumTxn)/flagLifespan.Seconds())
 	log.Printf("messages:     %s (%.2f/sec)", formatNumber(uint64(stats.NumMsg)),
 		float64(stats.NumMsg)/flagLifespan.Seconds())
+	log.Printf("spans:        %s (%.2f/sec)", formatNumber(uint64(stats.NumSpans)),
+		float64(stats.NumSpans)/flagLifespan.Seconds())
 	log.Print("errors:       ", formatNumber(uint64(stats.Errors)))
 	log.Print("timeouts:     ", formatNumber(uint64(stats.Timeouts)))
 

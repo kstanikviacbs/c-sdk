@@ -1,6 +1,13 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package newrelic
 
 import (
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -28,9 +35,12 @@ func TestConnectPayloadInternal(t *testing.T) {
 		Environment:       JSONString(`[["b", 2]]`),
 		HighSecurity:      false,
 		Labels:            JSONString(`[{"label_type":"c","label_value":"d"}]`),
+		Metadata:          JSONString(`{"NEW_RELIC_METADATA_ONE":"one","NEW_RELIC_METADATA_TWO":"two"}`),
 		RedirectCollector: "collector.newrelic.com",
 		Hostname:          "some_host",
 	}
+
+	info.AgentEventLimits.SpanEventConfig.Limit = 2323
 
 	expected := &RawConnectPayload{
 		Pid:             123,
@@ -42,6 +52,7 @@ func TestConnectPayloadInternal(t *testing.T) {
 		AppName:         []string{"one", "two"},
 		HighSecurity:    false,
 		Labels:          JSONString(`[{"label_type":"c","label_value":"d"}]`),
+		Metadata:        JSONString(`{"NEW_RELIC_METADATA_ONE":"one","NEW_RELIC_METADATA_TWO":"two"}`),
 		Environment:     JSONString(`[["b",2]]`),
 		Identifier:      "one;two",
 		Util:            util,
@@ -206,82 +217,6 @@ func TestPreconnectPayloadEncoded(t *testing.T) {
 	}
 }
 
-func TestConnectPayloadEncoded(t *testing.T) {
-	ramInitializer := new(uint64)
-	*ramInitializer = 1000
-	processors := 22
-	util := &utilization.Data{
-		MetadataVersion:   1,
-		LogicalProcessors: &processors,
-		RamMiB:            ramInitializer,
-	}
-	info := &AppInfo{
-		License:           "the_license",
-		Appname:           "one;two",
-		AgentLanguage:     "php",
-		AgentVersion:      "0.1",
-		HostDisplayName:   "my_awesome_host",
-		Settings:          map[string]interface{}{"a": "1", "b": true},
-		Environment:       JSONString(`[["b", 2]]`),
-		HighSecurity:      false,
-		Labels:            JSONString(`[{"label_type":"c","label_value":"d"}]`),
-		RedirectCollector: "collector.newrelic.com",
-		Hostname:          "some_host",
-	}
-
-	pid := 123
-	expected := `[` +
-		`{` +
-		`"pid":123,` +
-		`"language":"php",` +
-		`"agent_version":"0.1",` +
-		`"host":"some_host",` +
-		`"display_host":"my_awesome_host",` +
-		`"settings":{"a":"1","b":true},` +
-		`"app_name":["one","two"],` +
-		`"high_security":false,` +
-		`"labels":[{"label_type":"c","label_value":"d"}],` +
-		`"environment":[["b",2]],` +
-		`"identifier":"one;two",` +
-		`"utilization":{"metadata_version":1,"logical_processors":22,"total_ram_mib":1000,"hostname":"some_host"},` +
-		`"event_harvest_config":{"report_period_ms":60000,"harvest_limits":{"error_event_data":100,"analytic_event_data":10000,"custom_event_data":10000,"span_event_data":1000}}` +
-		`}` +
-		`]`
-
-	b, err := EncodePayload(info.ConnectPayloadInternal(pid, util))
-	if err != nil {
-		t.Error(err)
-	} else if string(b) != expected {
-		t.Errorf("expected: %s\nactual: %s", expected, string(b))
-	}
-
-	// an empty string for the HostDisplayName should not produce JSON
-	info.HostDisplayName = ""
-	expected = `[` +
-		`{` +
-		`"pid":123,` +
-		`"language":"php",` +
-		`"agent_version":"0.1",` +
-		`"host":"some_host",` +
-		`"settings":{"a":"1","b":true},` +
-		`"app_name":["one","two"],` +
-		`"high_security":false,` +
-		`"labels":[{"label_type":"c","label_value":"d"}],` +
-		`"environment":[["b",2]],` +
-		`"identifier":"one;two",` +
-		`"utilization":{"metadata_version":1,"logical_processors":22,"total_ram_mib":1000,"hostname":"some_host"},` +
-		`"event_harvest_config":{"report_period_ms":60000,"harvest_limits":{"error_event_data":100,"analytic_event_data":10000,"custom_event_data":10000,"span_event_data":1000}}` +
-		`}` +
-		`]`
-
-	b, err = EncodePayload(info.ConnectPayloadInternal(pid, util))
-	if err != nil {
-		t.Error(err)
-	} else if string(b) != expected {
-		t.Errorf("expected: %s\nactual: %s", expected, string(b))
-	}
-}
-
 func TestNeedsConnectAttempt(t *testing.T) {
 	var app App
 
@@ -305,13 +240,19 @@ func TestNeedsConnectAttempt(t *testing.T) {
 		t.Fatal(now, app.lastConnectAttempt, app.state)
 	}
 
-	app.state = AppStateInvalidLicense
+	app.state = AppStateDisconnected
 	app.lastConnectAttempt = now.Add(-limits.AppConnectAttemptBackoff)
 	if app.NeedsConnectAttempt(now, limits.AppConnectAttemptBackoff) {
 		t.Fatal(now, app.lastConnectAttempt, app.state)
 	}
 
-	app.state = AppStateDisconnected
+	app.state = AppStateRestart
+	app.lastConnectAttempt = now.Add(-limits.AppConnectAttemptBackoff)
+	if app.NeedsConnectAttempt(now, limits.AppConnectAttemptBackoff) {
+		t.Fatal(now, app.lastConnectAttempt, app.state)
+	}
+
+	app.state = AppStateInvalidLicense
 	app.lastConnectAttempt = now.Add(-limits.AppConnectAttemptBackoff)
 	if app.NeedsConnectAttempt(now, limits.AppConnectAttemptBackoff) {
 		t.Fatal(now, app.lastConnectAttempt, app.state)
@@ -375,5 +316,233 @@ func TestAppKeyEquals(t *testing.T) {
 	otherInfo.Hostname = "other_hostname"
 	if info.Key() == otherInfo.Key() {
 		t.Errorf("Key for application info must not match: %v and %v", info, otherInfo)
+	}
+
+	otherInfo = info
+	otherInfo.TraceObserverHost = "other_traceobserver"
+	if info.Key() == otherInfo.Key() {
+		t.Errorf("Key for application info must not match: %v and %v", info, otherInfo)
+	}
+
+	otherInfo = info
+	otherInfo.TraceObserverPort = 31339
+	if info.Key() == otherInfo.Key() {
+		t.Errorf("Key for application info must not match: %v and %v", info, otherInfo)
+	}
+}
+
+func TestConnectPayloadEncoded(t *testing.T) {
+	ramInitializer := new(uint64)
+	*ramInitializer = 1000
+	processors := 22
+	util := &utilization.Data{
+		MetadataVersion:   1,
+		LogicalProcessors: &processors,
+		RamMiB:            ramInitializer,
+	}
+	info := &AppInfo{
+		License:           "the_license",
+		Appname:           "one;two",
+		AgentLanguage:     "php",
+		AgentVersion:      "0.1",
+		HostDisplayName:   "my_awesome_host",
+		Settings:          map[string]interface{}{"a": "1", "b": true},
+		Environment:       JSONString(`[["b", 2]]`),
+		HighSecurity:      false,
+		Labels:            JSONString(`[{"label_type":"c","label_value":"d"}]`),
+		Metadata:          JSONString(`{"NEW_RELIC_METADATA_ONE":"one","NEW_RELIC_METADATA_TWO":"two"}`),
+		RedirectCollector: "collector.newrelic.com",
+		Hostname:          "some_host",
+	}
+
+	// A valid span event max samples stored value configured from the agent should
+	// propagate through and be sent to the collector
+	info.AgentEventLimits.SpanEventConfig.Limit = 2323
+
+	// A valid log event max samples stored value configured from the agent should
+	// propagate through and be sent to the collector
+	info.AgentEventLimits.LogEventConfig.Limit = 4545
+
+	// A valid custom event max samples stored value configured from the agent should
+	// propagate through and be sent to the collector
+	info.AgentEventLimits.CustomEventConfig.Limit = 1234
+
+	pid := 123
+	expected := `[` +
+		`{` +
+		`"pid":123,` +
+		`"language":"php",` +
+		`"agent_version":"0.1",` +
+		`"host":"some_host",` +
+		`"display_host":"my_awesome_host",` +
+		`"settings":{"a":"1","b":true},` +
+		`"app_name":["one","two"],` +
+		`"high_security":false,` +
+		`"labels":[{"label_type":"c","label_value":"d"}],` +
+		`"environment":[["b",2]],` +
+		`"metadata":{"NEW_RELIC_METADATA_ONE":"one","NEW_RELIC_METADATA_TWO":"two"},` +
+		`"identifier":"one;two",` +
+		`"utilization":{"metadata_version":1,"logical_processors":22,"total_ram_mib":1000,"hostname":"some_host"},` +
+		`"event_harvest_config":{"report_period_ms":60000,"harvest_limits":{"error_event_data":100,"analytic_event_data":10000,"custom_event_data":1234,"span_event_data":2323,"log_event_data":4545}}` +
+		`}` +
+		`]`
+
+	b, err := EncodePayload(info.ConnectPayloadInternal(pid, util))
+	if err != nil {
+		t.Error(err)
+	} else if string(b) != expected {
+		t.Errorf("expected: %s\nactual: %s", expected, string(b))
+	}
+
+	// An invalid span event max samples stored value configured from the agent should
+	// propagate defaults through and be sent to the collector
+	info.AgentEventLimits.SpanEventConfig.Limit = 12345
+
+	// An invalid log event max samples stored value configured from the agent should
+	// propagate defaults through and be sent to the collector
+	info.AgentEventLimits.LogEventConfig.Limit = 45678
+
+	// An invalid custom event max samples stored value configured from the agent should
+	// propagate defaults through and be sent to the collector
+	info.AgentEventLimits.CustomEventConfig.Limit = 456780
+
+	pid = 123
+	expected = `[` +
+		`{` +
+		`"pid":123,` +
+		`"language":"php",` +
+		`"agent_version":"0.1",` +
+		`"host":"some_host",` +
+		`"display_host":"my_awesome_host",` +
+		`"settings":{"a":"1","b":true},` +
+		`"app_name":["one","two"],` +
+		`"high_security":false,` +
+		`"labels":[{"label_type":"c","label_value":"d"}],` +
+		`"environment":[["b",2]],` +
+		`"metadata":{"NEW_RELIC_METADATA_ONE":"one","NEW_RELIC_METADATA_TWO":"two"},` +
+		`"identifier":"one;two",` +
+		`"utilization":{"metadata_version":1,"logical_processors":22,"total_ram_mib":1000,"hostname":"some_host"},` +
+		`"event_harvest_config":{"report_period_ms":60000,` +
+		`"harvest_limits":{"error_event_data":100,"analytic_event_data":10000,` +
+		`"custom_event_data":` + strconv.Itoa(limits.MaxCustomMaxEvents) + `,` +
+		`"span_event_data":` + strconv.Itoa(limits.MaxSpanMaxEvents) + `,` +
+		`"log_event_data":` + strconv.Itoa(limits.MaxLogMaxEvents) + `}}` +
+		`}` +
+		`]`
+
+	b, err = EncodePayload(info.ConnectPayloadInternal(pid, util))
+	if err != nil {
+		t.Error(err)
+	} else if string(b) != expected {
+		t.Errorf("expected: %s\nactual: %s", expected, string(b))
+	}
+
+	// an empty string for the HostDisplayName should not produce JSON
+	info.AgentEventLimits.SpanEventConfig.Limit = 1001
+	info.AgentEventLimits.LogEventConfig.Limit = 1002
+	info.AgentEventLimits.CustomEventConfig.Limit = 1003
+	info.HostDisplayName = ""
+	expected = `[` +
+		`{` +
+		`"pid":123,` +
+		`"language":"php",` +
+		`"agent_version":"0.1",` +
+		`"host":"some_host",` +
+		`"settings":{"a":"1","b":true},` +
+		`"app_name":["one","two"],` +
+		`"high_security":false,` +
+		`"labels":[{"label_type":"c","label_value":"d"}],` +
+		`"environment":[["b",2]],` +
+		`"metadata":{"NEW_RELIC_METADATA_ONE":"one","NEW_RELIC_METADATA_TWO":"two"},` +
+		`"identifier":"one;two",` +
+		`"utilization":{"metadata_version":1,"logical_processors":22,"total_ram_mib":1000,"hostname":"some_host"},` +
+		`"event_harvest_config":{"report_period_ms":60000,"harvest_limits":{"error_event_data":100,"analytic_event_data":10000,"custom_event_data":1003,"span_event_data":1001,"log_event_data":1002}}` +
+		`}` +
+		`]`
+
+	b, err = EncodePayload(info.ConnectPayloadInternal(pid, util))
+	if err != nil {
+		t.Error(err)
+	} else if string(b) != expected {
+		t.Errorf("expected: %s\nactual: %s", expected, string(b))
+	}
+
+	// an empty JSON for the Metadata should be sent
+	info.Metadata = JSONString(`{}`)
+	expected = `[` +
+		`{` +
+		`"pid":123,` +
+		`"language":"php",` +
+		`"agent_version":"0.1",` +
+		`"host":"some_host",` +
+		`"settings":{"a":"1","b":true},` +
+		`"app_name":["one","two"],` +
+		`"high_security":false,` +
+		`"labels":[{"label_type":"c","label_value":"d"}],` +
+		`"environment":[["b",2]],` +
+		`"metadata":{},` +
+		`"identifier":"one;two",` +
+		`"utilization":{"metadata_version":1,"logical_processors":22,"total_ram_mib":1000,"hostname":"some_host"},` +
+		`"event_harvest_config":{"report_period_ms":60000,"harvest_limits":{"error_event_data":100,"analytic_event_data":10000,"custom_event_data":1003,"span_event_data":1001,"log_event_data":1002}}` +
+		`}` +
+		`]`
+
+	b, err = EncodePayload(info.ConnectPayloadInternal(pid, util))
+	if err != nil {
+		t.Error(err)
+	} else if string(b) != expected {
+		t.Errorf("expected: %s\nactual: %s", expected, string(b))
+	}
+
+	// a NULL JSON for the Metadata should send an empty JSON
+	info.Metadata = nil
+	expected = `[` +
+		`{` +
+		`"pid":123,` +
+		`"language":"php",` +
+		`"agent_version":"0.1",` +
+		`"host":"some_host",` +
+		`"settings":{"a":"1","b":true},` +
+		`"app_name":["one","two"],` +
+		`"high_security":false,` +
+		`"labels":[{"label_type":"c","label_value":"d"}],` +
+		`"environment":[["b",2]],` +
+		`"metadata":{},` +
+		`"identifier":"one;two",` +
+		`"utilization":{"metadata_version":1,"logical_processors":22,"total_ram_mib":1000,"hostname":"some_host"},` +
+		`"event_harvest_config":{"report_period_ms":60000,"harvest_limits":{"error_event_data":100,"analytic_event_data":10000,"custom_event_data":1003,"span_event_data":1001,"log_event_data":1002}}` +
+		`}` +
+		`]`
+
+	b, err = EncodePayload(info.ConnectPayloadInternal(pid, util))
+	if err != nil {
+		t.Error(err)
+	} else if string(b) != expected {
+		t.Errorf("expected: %s\nactual: %s", expected, string(b))
+	}
+
+}
+
+func TestMaxPayloadSizeInBytesFromDefault(t *testing.T) {
+	expectedMaxPayloadSizeInBytes := limits.DefaultMaxPayloadSizeInBytes
+	cannedConnectReply := []byte(`{"agent_run_id":"1"}`) // parseConnectReply expects at least agent_run_id in collector reply
+
+	c, err := parseConnectReply(cannedConnectReply)
+	if err != nil {
+		t.Error(err)
+	} else if c.MaxPayloadSizeInBytes != expectedMaxPayloadSizeInBytes {
+		t.Errorf("parseConnectReply(nothing), got [%v], expected [%v]", c.MaxPayloadSizeInBytes, expectedMaxPayloadSizeInBytes)
+	}
+}
+
+func TestMaxPayloadSizeInBytesFromConnectReply(t *testing.T) {
+	expectedMaxPayloadSizeInBytes := 1000
+	cannedConnectReply := []byte(`{"agent_run_id":"1", "max_payload_size_in_bytes":` + fmt.Sprint(expectedMaxPayloadSizeInBytes) + `}`)
+
+	c, err := parseConnectReply(cannedConnectReply)
+	if err != nil {
+		t.Error(err)
+	} else if c.MaxPayloadSizeInBytes != expectedMaxPayloadSizeInBytes {
+		t.Errorf("parseConnectReply(something), got [%v], expected [%v]", c.MaxPayloadSizeInBytes, expectedMaxPayloadSizeInBytes)
 	}
 }

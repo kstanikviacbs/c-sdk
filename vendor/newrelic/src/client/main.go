@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package main
 
 import (
@@ -16,7 +21,7 @@ import (
 )
 
 var (
-	addr       = flag.String("addr", newrelic.DefaultListenSocket, "daemon address")
+	addr       = flag.String("addr", newrelic.DefaultListenSocket(), "daemon address")
 	agentRunID = flag.String("run", "", "agent run id")
 )
 

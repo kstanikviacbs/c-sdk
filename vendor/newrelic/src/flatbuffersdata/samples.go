@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package flatbuffersdata
 
 import (
@@ -19,6 +24,8 @@ var (
 		Labels:            newrelic.JSONString(`[]`),
 		RedirectCollector: "collector.newrelic.com",
 		Hostname:          "agent-hostname",
+		TraceObserverHost: "",
+		TraceObserverPort: 0,
 	}
 	SampleTxn = Txn{
 		Name:             "WebTransaction/Action/heyo",

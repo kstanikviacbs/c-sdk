@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package newrelic
 
 import (
@@ -28,8 +33,9 @@ type AppState int
 const (
 	AppStateUnknown AppState = iota
 	AppStateConnected
-	AppStateInvalidLicense
 	AppStateDisconnected
+	AppStateRestart
+	AppStateInvalidLicense
 	AppStateInvalidSecurityPolicies
 )
 
@@ -42,6 +48,8 @@ type AppKey struct {
 	AgentLanguage     string
 	AgentPolicies     string
 	AgentHostname     string
+	TraceObserverHost string
+	TraceObserverPort uint16
 }
 
 // AppInfo encapsulates information provided by an agent about an
@@ -57,10 +65,15 @@ type AppInfo struct {
 	Environment               JSONString
 	HighSecurity              bool
 	Labels                    JSONString
+	Metadata                  JSONString
 	RedirectCollector         string
 	SecurityPolicyToken       string
 	SupportedSecurityPolicies AgentPolicies
 	Hostname                  string
+	TraceObserverHost         string
+	TraceObserverPort         uint16
+	SpanQueueSize             uint64
+	AgentEventLimits          collector.EventConfigs
 }
 
 func (info *AppInfo) String() string {
@@ -79,20 +92,21 @@ type RawPreconnectPayload struct {
 }
 
 type RawConnectPayload struct {
-	Pid                int                            `json:"pid"`
-	Language           string                         `json:"language"`
-	Version            string                         `json:"agent_version"`
-	Host               string                         `json:"host"`
-	HostDisplayName    string                         `json:"display_host,omitempty"`
-	Settings           map[string]interface{}         `json:"settings"`
-	AppName            []string                       `json:"app_name"`
-	HighSecurity       bool                           `json:"high_security"`
-	Labels             JSONString                     `json:"labels"`
-	Environment        JSONString                     `json:"environment"`
-	Identifier         string                         `json:"identifier"`
-	Util               *utilization.Data           	  `json:"utilization,omitempty"`
-	SecurityPolicies   map[string]SecurityPolicy      `json:"security_policies,omitempty"`
-	EventHarvestConfig collector.EventHarvestConfig   `json:"event_harvest_config"`
+	Pid                int                          `json:"pid"`
+	Language           string                       `json:"language"`
+	Version            string                       `json:"agent_version"`
+	Host               string                       `json:"host"`
+	HostDisplayName    string                       `json:"display_host,omitempty"`
+	Settings           map[string]interface{}       `json:"settings"`
+	AppName            []string                     `json:"app_name"`
+	HighSecurity       bool                         `json:"high_security"`
+	Labels             JSONString                   `json:"labels"`
+	Environment        JSONString                   `json:"environment"`
+	Metadata           JSONString                   `json:"metadata"`
+	Identifier         string                       `json:"identifier"`
+	Util               *utilization.Data            `json:"utilization,omitempty"`
+	SecurityPolicies   map[string]SecurityPolicy    `json:"security_policies,omitempty"`
+	EventHarvestConfig collector.EventHarvestConfig `json:"event_harvest_config"`
 }
 
 // PreconnectReply contains all of the fields from the app preconnect command reply
@@ -106,11 +120,14 @@ type PreconnectReply struct {
 // that are used in the daemon.  The reply contains many more fields, but most
 // of them are used in the agent.
 type ConnectReply struct {
-	ID                 *AgentRunID                  `json:"agent_run_id"`
-	MetricRules        MetricRules                  `json:"metric_name_rules"`
-	SamplingFrequency  int                          `json:"sampling_target_period_in_seconds"`
-	SamplingTarget     int                          `json:"sampling_target"`
-	EventHarvestConfig collector.EventHarvestConfig `json:"event_harvest_config"`
+	ID                     *AgentRunID                      `json:"agent_run_id"`
+	MetricRules            MetricRules                      `json:"metric_name_rules"`
+	SamplingFrequency      int                              `json:"sampling_target_period_in_seconds"`
+	SamplingTarget         int                              `json:"sampling_target"`
+	EventHarvestConfig     collector.EventHarvestConfig     `json:"event_harvest_config"`
+	SpanEventHarvestConfig collector.SpanEventHarvestConfig `json:"span_event_harvest_config"`
+	RequestHeadersMap      map[string]string                `json:"request_headers_map"`
+	MaxPayloadSizeInBytes  int                              `json:"max_payload_size_in_bytes"`
 }
 
 // An App represents the state of an application.
@@ -143,6 +160,8 @@ func (info *AppInfo) Key() AppKey {
 		AgentLanguage:     info.AgentLanguage,
 		AgentPolicies:     info.SupportedSecurityPolicies.getSupportedPoliciesHash(),
 		AgentHostname:     info.Hostname,
+		TraceObserverHost: info.TraceObserverHost,
+		TraceObserverPort: info.TraceObserverPort,
 	}
 }
 
@@ -181,6 +200,7 @@ func EncodePayload(payload interface{}) ([]byte, error) {
 }
 
 func (info *AppInfo) ConnectPayloadInternal(pid int, util *utilization.Data) *RawConnectPayload {
+
 	data := &RawConnectPayload{
 		Pid:             pid,
 		Language:        info.AgentLanguage,
@@ -199,7 +219,7 @@ func (info *AppInfo) ConnectPayloadInternal(pid int, util *utilization.Data) *Ra
 		// Providing the identifier below works around this issue and allows users
 		// more flexibility in using application rollups.
 		Identifier:         info.Appname,
-		EventHarvestConfig: collector.NewEventHarvestConfig(),
+		EventHarvestConfig: collector.NewEventHarvestConfig(&info.AgentEventLimits),
 	}
 
 	// Fallback solution: if no host name was provided with the application
@@ -230,6 +250,11 @@ func (info *AppInfo) ConnectPayloadInternal(pid int, util *utilization.Data) *Ra
 		data.Labels = info.Labels
 	} else {
 		data.Labels = JSONString("[]")
+	}
+	if len(info.Metadata) > 0 {
+		data.Metadata = info.Metadata
+	} else {
+		data.Metadata = JSONString("{}")
 	}
 
 	return data
@@ -267,8 +292,18 @@ func (app *App) NeedsConnectAttempt(now time.Time, backoff time.Duration) bool {
 	return false
 }
 
+//Since span events are not included in Faster Event Harvest due to concerns
+//about downsampling within a distributed trace, the report period and harvest
+//limit are reported separately in span_event_harvest_config instead of
+//event_harvest_config.  Combine them both into EventHarvestConfig here.
+func combineEventConfig(ehc collector.EventHarvestConfig, sehc collector.SpanEventHarvestConfig) collector.EventHarvestConfig {
+	ehc.EventConfigs.SpanEventConfig.Limit = sehc.SpanEventConfig.Limit
+	ehc.EventConfigs.SpanEventConfig.ReportPeriod = sehc.SpanEventConfig.ReportPeriod
+	return ehc
+}
+
 func parseConnectReply(rawConnectReply []byte) (*ConnectReply, error) {
-	var c ConnectReply
+	c := ConnectReply{MaxPayloadSizeInBytes: limits.DefaultMaxPayloadSizeInBytes}
 
 	err := json.Unmarshal(rawConnectReply, &c)
 	if nil != err {
@@ -277,6 +312,9 @@ func parseConnectReply(rawConnectReply []byte) (*ConnectReply, error) {
 	if nil == c.ID {
 		return nil, errors.New("missing agent run id")
 	}
+
+	// Since the collector now sends seperately, we need to internally combine the limits.
+	c.EventHarvestConfig = combineEventConfig(c.EventHarvestConfig, c.SpanEventHarvestConfig)
 
 	return &c, nil
 }

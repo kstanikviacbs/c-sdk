@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package main
 
 import (
@@ -13,9 +18,8 @@ import (
 func runProgenitor(cfg *Config) {
 	var readyChan <-chan signal.WorkerState
 
-	// We will never wait for the worker if the daemon was started by an agent,
-	// since we don't want to block the agent process.
-	if !cfg.Agent && cfg.WaitForPort.Nanoseconds() > 0 {
+	// Setting the WaitForPort flag to `0` disables the timeout completely.
+	if cfg.WaitForPort.Nanoseconds() > 0 {
 		readyChan = signal.ListenForWorker(cfg.WaitForPort)
 	}
 

@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package flatbuffersdata
 
 import (
@@ -20,7 +25,7 @@ func BenchmarkAggregateTxn(b *testing.B) {
 	}
 
 	ag := newrelic.FlatTxn(data)
-	harvest := newrelic.NewHarvest(time.Now(), collector.NewHarvestLimits())
+	harvest := newrelic.NewHarvest(time.Now(), collector.NewHarvestLimits(nil))
 
 	// Add the metrics, so we are only doing lookups in the loop
 	ag.AggregateInto(harvest)
@@ -81,6 +86,12 @@ func TestFlatbuffersAppInfo(t *testing.T) {
 	if out.RedirectCollector != SampleAppInfo.RedirectCollector {
 		t.Fatal(out.RedirectCollector, SampleAppInfo.RedirectCollector)
 	}
+	if out.TraceObserverHost != SampleAppInfo.TraceObserverHost {
+		t.Fatal(out.TraceObserverHost, SampleAppInfo.TraceObserverHost)
+	}
+	if out.TraceObserverPort != SampleAppInfo.TraceObserverPort {
+		t.Fatal(out.TraceObserverPort, SampleAppInfo.TraceObserverPort)
+	}
 }
 
 func TestFlatbuffersTxnData(t *testing.T) {
@@ -126,7 +137,7 @@ func TestFlatbuffersTxnData(t *testing.T) {
 	if nil != err {
 		t.Fatal(err)
 	}
-	harvest := newrelic.NewHarvest(time.Now(), collector.NewHarvestLimits())
+	harvest := newrelic.NewHarvest(time.Now(), collector.NewHarvestLimits(nil))
 	ag := newrelic.FlatTxn(data)
 	ag.AggregateInto(harvest)
 	id := newrelic.AgentRunID("12345")
@@ -168,12 +179,12 @@ func TestFlatbuffersTxnData(t *testing.T) {
 	}
 
 	out, err = harvest.CustomEvents.Data(id, now)
-	if nil != err || string(out) != `["12345",{"reservoir_size":10000,"events_seen":3},[[{"x":1}],[{"x":2}],[{"x":3}]]]` {
+	if nil != err || string(out) != `["12345",{"reservoir_size":100000,"events_seen":3},[[{"x":1}],[{"x":2}],[{"x":3}]]]` {
 		t.Fatal(err, string(out))
 	}
 
 	out, err = harvest.SpanEvents.Data(id, now)
-	if nil != err || string(out) != `["12345",{"reservoir_size":1000,"events_seen":3},[[{"Span1":1}],[{"Span2":2}],[{"Span3":3}]]]` {
+	if nil != err || string(out) != `["12345",{"reservoir_size":10000,"events_seen":3},[[{"Span1":1}],[{"Span2":2}],[{"Span3":3}]]]` {
 		t.Fatal(err, string(out))
 	}
 

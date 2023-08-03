@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 // Default limits.
 //
 // This should be kept in sync with axiom/nr_limits.h, which is the agent's
@@ -11,7 +16,13 @@ import (
 const (
 	// AppLimit is the maximum number of applications that the daemon will
 	// support.  The agent's limit is in nr_app.h.
+	// AppLimitNotifyHigh is the limit at which a notification will be output that
+	// the number of applications connected has reached this value from below.
+	// AppLimitNotifyLow is the lower limit at which a notification will be
+	// output that the number of applications has dropped to this point.
 	AppLimit                 = 250
+	AppLimitNotifyHigh       = 200
+	AppLimitNotifyLow        = 25
 	AppConnectAttemptBackoff = 30 * time.Second
 
 	// DefaultAppTimeout specifies the elapsed time after which an application
@@ -20,17 +31,19 @@ const (
 	DefaultAppTimeout = 10 * time.Minute
 
 	// Harvest Data Limits
-	DefaultReportPeriod   = 60 * time.Second
-	MaxMetrics            = 2 * 1000
-	MaxTxnEvents          = 10 * 1000
-	MaxCustomEvents       = 10 * 1000
-	MaxErrorEvents        = 100
-	MaxSpanEvents         = 1000
-	MaxErrors             = 20
-	MaxSlowSQLs           = 10
-	MaxRegularTraces      = 1
-	MaxForcePersistTraces = 10
-	MaxSyntheticsTraces   = 20
+	DefaultReportPeriod          = 60 * time.Second
+	MaxMetrics                   = 2 * 1000
+	MaxTxnEvents                 = 10 * 1000
+	MaxCustomMaxEvents           = 100 * 1000
+	MaxErrorEvents               = 100
+	MaxSpanMaxEvents             = 10000
+	MaxLogMaxEvents              = 20 * 1000
+	MaxErrors                    = 20
+	MaxSlowSQLs                  = 10
+	MaxRegularTraces             = 1
+	MaxForcePersistTraces        = 10
+	MaxSyntheticsTraces          = 20
+	DefaultMaxPayloadSizeInBytes = 1000 * 1000
 
 	// Failed Harvest Data Rollover Limits
 	// Use the same harvest failure limit for custom events and txn events
@@ -57,8 +70,9 @@ const (
 
 	// Processor channel buffering:
 
-	TxnDataChanBuffering = 10000
-	AppInfoChanBuffering = 100
+	TxnDataChanBuffering   = 10000
+	AppInfoChanBuffering   = 100
+	SpanBatchChanBuffering = 100
 
 	// HostLengthByteLimit is the maximum number of bytes that will be
 	// sent for either the host and display host names in the connect command.

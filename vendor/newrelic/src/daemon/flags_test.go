@@ -1,3 +1,8 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package main
 
 import (
@@ -12,7 +17,7 @@ import (
 
 var defaultConfig = &Config{
 	WaitForPort: 3 * time.Second,
-	BindAddr:    newrelic.DefaultListenSocket,
+	BindAddr:    newrelic.DefaultListenSocket(),
 }
 
 func TestParseFlagsWithAll(t *testing.T) {
@@ -68,7 +73,7 @@ func TestParseFlagsWithAll(t *testing.T) {
 func TestParseFlagsPortAddress(t *testing.T) {
 
 	// None given.
-	expected := newrelic.DefaultListenSocket
+	expected := newrelic.DefaultListenSocket()
 	cfg := &Config{}
 	args := []string{}
 
@@ -176,7 +181,7 @@ func TestParseConfigFile(t *testing.T) {
 
 	cfgExpected := &Config{
 		ConfigFile: "../newrelic/sample_config/config1.cfg",
-		LogLevel:   4,
+		LogLevel:   5,
 		LogFile:    "/var/log/newrelic/newrelic-daemon.log",
 	}
 
@@ -195,7 +200,7 @@ func TestParseCommandLineTakesPrecedence(t *testing.T) {
 	}
 
 	cfgExpected := &Config{
-		BindAddr:    newrelic.DefaultListenSocket,
+		BindAddr:    newrelic.DefaultListenSocket(),
 		ConfigFile:  "../newrelic/sample_config/config1.cfg",
 		LogFile:     "foo.log",
 		LogLevel:    1,

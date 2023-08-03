@@ -1,6 +1,12 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package main
 
 import (
+	"context"
 	"errors"
 	"expvar"
 	"fmt"
@@ -115,8 +121,10 @@ func runWorker(cfg *Config) {
 	// --watchdog-foreground flags were supplied.
 	hasProgenitor := !(cfg.Foreground || cfg.WatchdogForeground)
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	select {
-	case <-listenAndServe(cfg.BindAddr, errorChan, p, hasProgenitor):
+	case <-listenAndServe(ctx, cfg.BindAddr, errorChan, p, hasProgenitor):
 		log.Debugf("listener shutdown - exiting")
 	case err := <-errorChan:
 		if err != nil {
@@ -128,6 +136,10 @@ func runWorker(cfg *Config) {
 			}
 		}
 	case caught := <-signalChan:
+		// Close the listener before sending remaining data. This ensures that the socket
+		// connection is closed as soon as possible and other processes can start listening
+		// the socket while remaining data is sent.
+		cancel()
 		log.Infof("worker received signal %d - sending remaining data", caught)
 		p.CleanExit()
 		log.Infof("worker sent remaining data, now exiting")
@@ -137,7 +149,7 @@ func runWorker(cfg *Config) {
 // listenAndServe starts and supervises the listener. If the listener
 // terminates with an error, it is sent on errorChan; otherwise, the
 // returned channel is closed to indicate a clean exit.
-func listenAndServe(address string, errorChan chan<- error, p *newrelic.Processor, hasProgenitor bool) <-chan struct{} {
+func listenAndServe(ctx context.Context, address string, errorChan chan<- error, p *newrelic.Processor, hasProgenitor bool) <-chan struct{} {
 	doneChan := make(chan struct{})
 
 	go func() {
@@ -176,6 +188,14 @@ func listenAndServe(address string, errorChan chan<- error, p *newrelic.Processo
 				}
 			}
 
+			// Let's not retry for non-temporary errors (e. g. if the address is
+			// already in use).
+			perr, ok := err.(*net.OpError)
+			if ok && !perr.Temporary() {
+				respawn = false
+				log.Errorf("received error, no respawning: %v", perr)
+			}
+
 			errorChan <- &workerError{
 				Component: "listener",
 				Respawn:   respawn,
@@ -184,6 +204,13 @@ func listenAndServe(address string, errorChan chan<- error, p *newrelic.Processo
 
 			return
 		}
+
+		go func() {
+			select {
+			case <-ctx.Done():
+				list.Close()
+			}
+		}()
 
 		defer list.Close()
 		log.Infof("daemon listening on %s", addr)

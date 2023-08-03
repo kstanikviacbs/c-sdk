@@ -1,4 +1,14 @@
+//
+// Copyright 2020 New Relic Corporation. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+
 package newrelic
+
+import (
+	"newrelic/infinite_tracing"
+	"time"
+)
 
 // This type takes the HarvestType values sent from an application's harvest
 // trigger function, decorates them with the application, run ID, and harvest,
@@ -8,6 +18,7 @@ package newrelic
 type AppHarvest struct {
 	*App
 	*Harvest
+	*infinite_tracing.TraceObserver
 
 	trigger chan HarvestType
 	cancel  chan bool
@@ -23,10 +34,24 @@ func (ah *AppHarvest) NewProcessorHarvestEvent(id AgentRunID, t HarvestType) Pro
 
 func NewAppHarvest(id AgentRunID, app *App, harvest *Harvest, ph chan ProcessorHarvest) *AppHarvest {
 	ah := &AppHarvest{
-		App:     app,
-		Harvest: harvest,
-		trigger: make(chan HarvestType),
-		cancel:  make(chan bool),
+		App:           app,
+		Harvest:       harvest,
+		TraceObserver: nil,
+		trigger:       make(chan HarvestType),
+		cancel:        make(chan bool),
+	}
+
+	if len(app.info.TraceObserverHost) > 0 {
+		cfg := &infinite_tracing.Config{
+			RunId:             id.String(),
+			License:           string(app.info.License),
+			Host:              app.info.TraceObserverHost,
+			Port:              app.info.TraceObserverPort,
+			Secure:            true,
+			QueueSize:         app.info.SpanQueueSize,
+			RequestHeadersMap: app.connectReply.RequestHeadersMap,
+		}
+		ah.TraceObserver = infinite_tracing.NewTraceObserver(cfg)
 	}
 
 	// Start a goroutine to handle messages from the application's harvest trigger
@@ -48,6 +73,10 @@ func (ah *AppHarvest) Close() error {
 	// Wait for confirmation that the cancellation has been processed before
 	// closing the trigger.
 	<-ah.cancel
+
+	if ah.TraceObserver != nil {
+		ah.TraceObserver.Shutdown(500 * time.Millisecond)
+	}
 
 	close(ah.trigger)
 	close(ah.cancel)
